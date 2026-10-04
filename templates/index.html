@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="id">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="KidneyAI membantu meninjau citra CT Scan dengan deteksi objek berbasis YOLO.">
+  <title>makan gratis nya mana wok???</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <header class="site-header">
+    <a class="wordmark" href="#beranda" aria-label="KidneyAI, beranda"><span class="mark" aria-hidden="true">K</span>kidney<span>ai</span></a>
+    <button class="menu-toggle" aria-expanded="false" aria-controls="navigation" aria-label="Buka navigasi">☰</button>
+    <nav id="navigation" aria-label="Navigasi utama">
+      <a href="#beranda">Beranda</a><a href="#tentang">Tentang</a><a href="#teknologi">Teknologi</a>
+      <a class="nav-cta" href="#deteksi">Mulai deteksi</a>
+    </nav>
+  </header>
+
+  <main>
+    <section class="hero" id="beranda">
+      <div class="hero-copy">
+        <p class="eyebrow"><span></span> Analisis citra medis</p>
+        <h1>Melihat lebih jelas.<br><em>Meninjau lebih terarah.</em></h1>
+        <p class="lead">Unggah citra CT Scan dan lihat area yang ditandai model deteksi KidneyAI. Hasilnya ditampilkan untuk membantu peninjauan, bukan menetapkan diagnosis.</p>
+        <a class="button button-primary" href="#deteksi">Mulai analisis <span aria-hidden="true">↘</span></a>
+        <p class="hero-note">Untuk citra JPG, JPEG, atau PNG hingga 16 MB</p>
+      </div>
+      <div class="scan-art" aria-label="Ilustrasi abstrak irisan citra CT Scan">
+        <div class="scan-label">POTONGAN CT <span>01 / IMAGE</span></div>
+        <div class="scan-ring ring-one"></div><div class="scan-ring ring-two"></div>
+        <div class="kidney-shape"></div>
+        <div class="target-box"><span class="target-dot"></span><span class="target-caption">AREA TINJAUAN</span></div>
+        <div class="scan-crosshair">+</div><div class="scan-footer">KIDNEYAI <span>VISUAL ANALYSIS</span></div>
+      </div>
+    </section>
+
+    <section class="disclaimer" aria-label="Pemberitahuan penggunaan"><span class="info-mark">i</span><p><strong>Alat bantu analisis, bukan diagnosis.</strong> Hasil sistem perlu ditinjau dan diverifikasi oleh tenaga medis profesional.</p></section>
+
+    <section class="workflow" id="tentang">
+      <div class="section-heading"><div><p class="eyebrow">DARI CITRA KE VISUALISASI</p><h2>Proses yang mudah ditinjau.</h2></div><p>KidneyAI menjalankan model object detection pada gambar yang Anda pilih, lalu menyajikan lokasi dan skor prediksi.</p></div>
+      <div class="workflow-line"><article><span class="step-index">01</span><h3>Pilih citra</h3><p>Unggah gambar CT Scan dalam format yang didukung.</p></article><article><span class="step-index">02</span><h3>Jalankan model</h3><p>YOLO memprediksi kelas, lokasi objek, dan confidence.</p></article><article><span class="step-index">03</span><h3>Tinjau hasil</h3><p>Periksa kotak deteksi dan gambar hasil anotasi.</p></article></div>
+    </section>
+
+    <section class="technology" id="teknologi"><div class="tech-number">YOLO<br><span>v8</span></div><div><p class="eyebrow">TEKNOLOGI DI BALIK ANALISIS</p><h2>Deteksi objek, ditampilkan secara visual.</h2><p>Backend Python menjalankan inferensi YOLO dan mengembalikan label, confidence score, serta koordinat bounding box. Prediksi bergantung pada bobot model dan data latih yang disediakan.</p></div><div class="tech-stack"><span>PYTHON</span><span>FLASK API</span><span>PYTORCH</span><span>OPENCV</span></div></section>
+
+    <section class="detect-section" id="deteksi">
+      <div class="detect-intro"><p class="eyebrow">RUANG ANALISIS</p><h2>Deteksi batu ginjal.</h2><p class="medical-review-note">Hasil sistem perlu ditinjau dan diverifikasi oleh tenaga medis profesional.</p><p>Unggah satu irisan CT. Kidney dilokalisasi dari mask segmentasi CT; label Stone memakai pseudo-label dan perlu dikonfirmasi tenaga medis.</p></div>
+      <div class="workspace">
+        <div class="upload-panel">
+          <label class="dropzone" id="dropzone" for="image-file" tabindex="0" aria-label="Pilih atau letakkan gambar CT Scan">
+            <input id="image-file" type="file" accept="image/png,image/jpeg,.png,.jpg,.jpeg" hidden>
+            <span class="upload-symbol" aria-hidden="true">＋</span><strong>Pilih gambar CT Scan</strong><span class="drop-hint">atau tarik dan letakkan file di sini</span><span class="file-rule">PNG, JPG, JPEG · Maksimal 16 MB</span>
+          </label>
+          <div class="preview-wrap" id="preview-wrap" hidden><img id="preview-image" alt="Pratinjau gambar CT Scan"><div class="preview-meta"><span id="file-name"></span><button id="remove-file" type="button" class="text-button">Hapus gambar</button></div></div>
+          <fieldset class="threshold-control"><legend>Ambang confidence kandidat batu</legend><label for="stone-threshold"><span>Stone <strong id="stone-threshold-value">10%</strong></span><input id="stone-threshold" type="range" min="5" max="80" value="10" step="5"></label><span class="threshold-help">Ambang ginjal ditetapkan otomatis. Ambang batu lebih rendah menampilkan lebih banyak kandidat, termasuk kemungkinan deteksi keliru.</span></fieldset>
+          <button class="button button-primary analyze-button" id="analyze-button" type="button" disabled>Mulai analisis</button>
+          <p class="form-message" id="form-message" role="status" aria-live="polite"></p>
+        </div>
+        <div class="result-panel" aria-live="polite">
+          <div class="result-head"><h3>Hasil deteksi</h3><span id="result-state">MENUNGGU GAMBAR</span></div>
+          <div class="model-status" id="model-status" aria-label="Status model"><span class="model-pill">Kidney: memuat status</span><span class="model-pill">Stone: memuat status</span></div>
+          <div class="result-empty" id="result-empty"><div class="empty-frame"><span>CT</span><i></i></div><p>Visualisasi hasil akan tampil di sini setelah analisis.</p></div>
+          <div class="result-data" id="result-data" hidden><img id="result-image" alt="CT Scan dengan bounding box hasil deteksi"><div class="result-summary"><strong id="result-status"></strong><span id="result-count"></span></div><div class="class-summary" id="class-summary"></div><div class="detection-list" id="detection-list"></div><a id="download-result" class="download-link" download="kidneyai-hasil.jpg">Unduh gambar hasil</a></div>
+        </div>
+      </div>
+    </section>
+  </main>
+  <footer><a class="wordmark" href="#beranda"><span class="mark" aria-hidden="true">K</span>kidney<span>ai</span></a><p>KidneyAI adalah prototipe bantuan analisis citra. Keputusan medis tetap berada pada tenaga kesehatan profesional.</p></footer>
+  <script src="{{ url_for('static', filename='app.js') }}" defer></script>
+</body>
+</html>
