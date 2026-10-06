@@ -3,7 +3,10 @@ from werkzeug.exceptions import RequestEntityTooLarge
 from werkzeug.utils import secure_filename
 from PIL import Image, UnidentifiedImageError
 from pathlib import Path
+import base64
+import cv2
 import io
+import numpy as np
 import os
 
 app = Flask(__name__)
@@ -69,180 +72,168 @@ def detect():
 
     try:
         try:
-            kidney_threshold = float(request.form.get("kidney_confidence", "0.05"))
-            stone_threshold = float(request.form.get("stone_confidence", request.form.get("confidence", "0.10")))
+            kidney_threshold = float(request.form.get("kidney_confidence", "0.25"))
+            stone_threshold = float(request.form.get("stone_confidence", request.form.get("confidence", "0.20")))
         except ValueError:
             return jsonify(success=False, message="Ambang confidence harus berupa angka."), 400
-        if not 0.05 <= kidney_threshold <= 0.9 or not 0.03 <= stone_threshold <= 0.9:
-            return jsonify(success=False, message="Ambang ginjal harus 5–90% dan batu 3–90%."), 400
+        if not 0.15 <= kidney_threshold <= 0.95 or not 0.05 <= stone_threshold <= 0.95:
+            return jsonify(success=False, message="Ambang ginjal harus 15–95% dan batu 5–95%."), 400
         detections = []
         stone_model = get_model()
         img_w, img_h = image.size
-        # Scan the full frame plus overlapping tiles. Tiles give tiny stones more
-        # pixels at inference time, especially in coronal/sagittal screenshots.
+
+        # Models used for stone detection across full frame and overlapping tiles.
+        # Running both joint and dedicated coronal stone models on tiles provides
+        # high sensitivity for small calcifications in axial, coronal, and sagittal scans.
+        stone_models = [stone_model]
+        if STONE_CORONAL_MODEL_PATH.is_file():
+            stone_models.append(get_stone_coronal_model())
+
         stone_candidates = []
-        scan_inputs = [(image, 0, 0, img_w, img_h)]
-        if min(img_w, img_h) >= 384:
-            mid_x, mid_y = img_w // 2, img_h // 2
-            x_ranges = [(0, min(img_w, int(img_w * 0.62))),
-                        (max(0, int(img_w * 0.38)), img_w)]
-            y_ranges = [(0, min(img_h, int(img_h * 0.62))),
-                        (max(0, int(img_h * 0.38)), img_h)]
+        scan_inputs = [(image, 0, 0)]
+        if min(img_w, img_h) >= 300:
+            x_ranges = [(0, min(img_w, int(img_w * 0.65))),
+                        (max(0, int(img_w * 0.35)), img_w)]
+            y_ranges = [(0, min(img_h, int(img_h * 0.65))),
+                        (max(0, int(img_h * 0.35)), img_h)]
             for left, right in x_ranges:
                 for top, bottom in y_ranges:
-                    scan_inputs.append((image.crop((left, top, right, bottom)), left, top, right, bottom))
+                    scan_inputs.append((image.crop((left, top, right, bottom)), left, top))
 
-        for scan_image, offset_x, offset_y, _, _ in scan_inputs:
-            scan_result = stone_model.predict(scan_image, conf=min(stone_threshold, 0.08),
-                                              imgsz=512, verbose=False)[0]
-            for box in scan_result.boxes:
-                class_id = int(box.cls.item())
-                label = scan_result.names.get(class_id, str(class_id))
-                if label.lower() != "stone":
-                    continue
-                coords = box.xyxy[0].tolist()
-                mapped = [round(coords[0] + offset_x, 2), round(coords[1] + offset_y, 2),
-                          round(coords[2] + offset_x, 2), round(coords[3] + offset_y, 2)]
-                stone_candidates.append({"class": "Stone", "confidence": round(float(box.conf.item()), 4), "bbox": mapped})
+        for scan_image, offset_x, offset_y in scan_inputs:
+            for sm in stone_models:
+                scan_result = sm.predict(scan_image, conf=stone_threshold,
+                                          imgsz=640, verbose=False)[0]
+                for box in scan_result.boxes:
+                    class_id = int(box.cls.item())
+                    label = scan_result.names.get(class_id, str(class_id))
+                    if label.lower() != "stone":
+                        continue
+                    coords = box.xyxy[0].tolist()
+                    mapped = [round(coords[0] + offset_x, 2), round(coords[1] + offset_y, 2),
+                              round(coords[2] + offset_x, 2), round(coords[3] + offset_y, 2)]
+                    stone_candidates.append({"class": "Stone", "confidence": round(float(box.conf.item()), 4), "bbox": mapped})
 
-        # Kidney class comes from the joint checkpoint, then the dedicated mask
-        # model can add improved kidney boxes. This model is never used to infer stone.
+        # Kidney localization from joint model and dedicated multiplane kidney weights.
         kidney_candidates = []
-        full_result = stone_model.predict(image, conf=min(kidney_threshold, 0.08), imgsz=512, verbose=False)[0]
+        full_result = stone_model.predict(image, conf=min(kidney_threshold, 0.20), imgsz=640, verbose=False)[0]
         for box in full_result.boxes:
             label = full_result.names.get(int(box.cls.item()), "")
             if label.lower() == "kidney":
                 xyxy = [round(float(value), 2) for value in box.xyxy[0].tolist()]
                 kidney_candidates.append((float(box.conf.item()), xyxy))
+
         kidney_model_available = KIDNEY_MODEL_PATH.is_file()
-        kidney_boxes = []
         if kidney_model_available:
-            # Run the kidney model on the full image and overlapping left/right
-            # halves. In axial slices, each kidney then occupies more of the model
-            # input, helping it return both sides rather than only the clearer one.
             kidney_model = get_kidney_model()
             kidney_inputs = [(image, 0)]
             if img_w >= 320:
                 split_x = img_w // 2
-                overlap = int(img_w * 0.10)
+                overlap = int(img_w * 0.12)
                 kidney_inputs.extend([
                     (image.crop((0, 0, min(img_w, split_x + overlap), img_h)), 0),
                     (image.crop((max(0, split_x - overlap), 0, img_w, img_h)), max(0, split_x - overlap)),
                 ])
             for kidney_input, offset_x in kidney_inputs:
-                kidney_result = kidney_model.predict(kidney_input, conf=0.01, imgsz=640, verbose=False)[0]
+                kidney_result = kidney_model.predict(kidney_input, conf=min(kidney_threshold, 0.20), imgsz=640, verbose=False)[0]
                 for box in kidney_result.boxes:
                     coords = box.xyxy[0].tolist()
                     xyxy = [round(coords[0] + offset_x, 2), round(coords[1], 2),
                             round(coords[2] + offset_x, 2), round(coords[3], 2)]
                     kidney_candidates.append((float(box.conf.item()), xyxy))
 
-            # candidates from joint and dedicated kidney weights are combined below
-
         kidney_candidates.sort(key=lambda item: item[0], reverse=True)
         displayed_kidneys = []
         for score, xyxy in kidney_candidates:
-                x1, y1, x2, y2 = xyxy
-                box_w, box_h = (x2 - x1) / img_w, (y2 - y1) / img_h
-                center_y = ((y1 + y2) / 2) / img_h
-                box_area = box_w * box_h
-                # KiTS23 includes several abdominal structures around the kidneys.
-                # Reject very broad masks and pelvic/liver proposals before showing
-                # them as kidneys. This is a conservative ROI filter, not anatomy proof.
-                if not (0.12 <= center_y <= 0.82 and 0.07 <= box_w <= 0.38
-                        and 0.07 <= box_h <= 0.48 and 0.008 <= box_area <= 0.10):
-                    continue
-                center_x = (x1 + x2) / 2
-                if any(abs(center_x - (k["bbox"][0] + k["bbox"][2]) / 2) < img_w * 0.12
-                       for k in displayed_kidneys):
-                    continue
+            x1, y1, x2, y2 = xyxy
+            box_w, box_h = (x2 - x1) / img_w, (y2 - y1) / img_h
+            center_y = ((y1 + y2) / 2) / img_h
+            center_x = ((x1 + x2) / 2) / img_w
+            box_area = box_w * box_h
+            if not (0.10 <= center_y <= 0.90 and 0.04 <= box_w <= 0.50
+                    and 0.04 <= box_h <= 0.60 and 0.003 <= box_area <= 0.22):
+                continue
+            if any(abs(center_x - (k["bbox"][0] + k["bbox"][2]) / (2 * img_w)) < 0.10
+                   for k in displayed_kidneys):
+                continue
+            if score >= max(kidney_threshold, 0.15):
                 candidate = {"class": "Kidney", "confidence": round(score, 4), "bbox": xyxy}
                 displayed_kidneys.append(candidate)
-                kidney_boxes.append(xyxy)
-                if score >= max(kidney_threshold, 0.05) and len(displayed_kidneys) <= 2:
-                    detections.append(candidate)
-                if len(displayed_kidneys) == 2:
-                    break
+                detections.append(candidate)
+            if len(displayed_kidneys) == 2:
+                break
 
-        # Small calcifications can be hard to resolve at full-frame scale.
-        # Run the Stone model on kidney-centered crops and map boxes to source pixels.
-        if kidney_boxes and "Stone" in stone_model.names.values():
-            import numpy as np
-            from PIL import Image as PILImage
-            for kbox in kidney_boxes:
-                x1, y1, x2, y2 = kbox
-                pad_x, pad_y = (x2 - x1) * 0.28, (y2 - y1) * 0.28
-                left, top = max(0, int(x1 - pad_x)), max(0, int(y1 - pad_y))
-                right, bottom = min(img_w, int(x2 + pad_x)), min(img_h, int(y2 + pad_y))
-                if right - left < 24 or bottom - top < 24:
-                    continue
-                crop = image.crop((left, top, right, bottom))
-                crop_result = stone_model.predict(crop, conf=min(stone_threshold, 0.08), imgsz=768, verbose=False)[0]
-                scale_x, scale_y = (right - left) / crop.width, (bottom - top) / crop.height
-                for box in crop_result.boxes:
-                    if crop_result.names.get(int(box.cls.item()), "").lower() != "stone":
-                        continue
-                    crop_box = box.xyxy[0].tolist()
-                    mapped = [
-                        round(left + crop_box[0] * scale_x, 2), round(top + crop_box[1] * scale_y, 2),
-                        round(left + crop_box[2] * scale_x, 2), round(top + crop_box[3] * scale_y, 2),
-                    ]
-                    detections.append({"class": "Stone", "confidence": round(float(box.conf.item()), 4), "bbox": mapped})
-
-        # Supplemental detector trained on paired coronal CT Stone annotations.
-        if STONE_CORONAL_MODEL_PATH.is_file():
-            coronal_result = get_stone_coronal_model().predict(
-                image, conf=stone_threshold, imgsz=640, verbose=False)[0]
-            for box in coronal_result.boxes:
-                coords = [round(float(value), 2) for value in box.xyxy[0].tolist()]
-                detections.append({"class": "Stone", "confidence": round(float(box.conf.item()), 4), "bbox": coords})
-
-        # Suppress duplicate Stone boxes from overlapping full-frame, tile, and coronal-model predictions.
+        # Suppress duplicate Stone boxes and filter false positives (bones/ribs)
         stone_detections = sorted(
-            [d for d in stone_candidates + [x for x in detections if x["class"].lower() == "stone"]
-             if d["confidence"] >= stone_threshold],
+            [d for d in stone_candidates if d["confidence"] >= stone_threshold],
             key=lambda d: d["confidence"], reverse=True)
         kidney_detections = [d for d in detections if d["class"].lower() != "stone"]
-        # Stones are focal calcifications. Reject oversized boxes that span
-        # bowel, spine, or pelvis, which are common pseudo-label model failures.
+
         plausible_stones = []
         for stone in stone_detections:
             sx1, sy1, sx2, sy2 = stone["bbox"]
             sw, sh = (sx2 - sx1) / img_w, (sy2 - sy1) / img_h
-            if sw > 0.065 or sh > 0.065 or sw * sh > 0.0025:
+            scx, scy = (sx1 + sx2) / (2 * img_w), (sy1 + sy2) / (2 * img_h)
+            if not (0.10 <= scx <= 0.90 and 0.15 <= scy <= 0.88):
                 continue
+
+            crop_x1, crop_y1 = int(max(0, sx1)), int(max(0, sy1))
+            crop_x2, crop_y2 = int(min(img_w, sx2)), int(min(img_h, sy2))
+            if crop_x2 - crop_x1 < 1 or crop_y2 - crop_y1 < 1:
+                continue
+            crop = np.asarray(image)[crop_y1:crop_y2, crop_x1:crop_x2]
+            if crop.size == 0:
+                continue
+            median_brightness = np.median(crop)
+            std_brightness = np.std(crop)
+            is_dense_focal = (median_brightness > 150) and (std_brightness < 75)
+
+            if sw > 0.25 or sh > 0.25 or sw * sh > 0.045:
+                continue
+            if sw < 0.02 or sh < 0.02 or sw * sh < 0.0002:
+                if not is_dense_focal:
+                    continue
+
             if kidney_detections:
                 near_kidney = False
                 for kidney in kidney_detections:
                     kx1, ky1, kx2, ky2 = kidney["bbox"]
-                    px, py = (kx2 - kx1) * 0.35, (ky2 - ky1) * 0.35
-                    if (sx2 >= kx1-px and sx1 <= kx2+px
-                            and sy2 >= ky1-py and sy1 <= ky2+py):
+                    px, py = (kx2 - kx1) * 0.15, (ky2 - ky1) * 0.15
+                    if (sx2 >= kx1 - px and sx1 <= kx2 + px
+                            and sy2 >= ky1 - py and sy1 <= ky2 + py):
+                        near_kidney = True
+                        break
+                    midline = img_w / 2
+                    ckx1 = max(0, 2 * midline - kx2 - px)
+                    ckx2 = min(img_w, 2 * midline - kx1 + px)
+                    if (sx2 >= ckx1 and sx1 <= ckx2 and sy2 >= ky1 - py and sy1 <= ky2 + py):
                         near_kidney = True
                         break
                 if not near_kidney:
                     continue
+            else:
+                if not is_dense_focal and median_brightness < 180:
+                    continue
             plausible_stones.append(stone)
+
         stone_detections = plausible_stones
         unique_stones = []
         for candidate in stone_detections:
             x1, y1, x2, y2 = candidate["bbox"]
-            area_a = max(1, (x2-x1)*(y2-y1))
+            area_a = max(1, (x2 - x1) * (y2 - y1))
             duplicate = False
             for kept in unique_stones:
-                a1,b1,a2,b2 = kept["bbox"]
-                inter = max(0,min(x2,a2)-max(x1,a1))*max(0,min(y2,b2)-max(y1,b1))
-                area_b = max(1,(a2-a1)*(b2-b1))
+                a1, b1, a2, b2 = kept["bbox"]
+                inter = max(0, min(x2, a2) - max(x1, a1)) * max(0, min(y2, b2) - max(y1, b1))
+                area_b = max(1, (a2 - a1) * (b2 - b1))
                 intersection_over_min = inter / max(1, min(area_a, area_b))
-                if inter / (area_a + area_b - inter) > 0.15 or intersection_over_min > 0.55:
+                if inter / (area_a + area_b - inter) > 0.18 or intersection_over_min > 0.50:
                     duplicate = True
                     break
             if not duplicate:
                 unique_stones.append(candidate)
         detections = kidney_detections + unique_stones
 
-        import cv2
-        import numpy as np
         plotted = np.asarray(image).copy()
         colors = {"Kidney": (220, 70, 35), "Stone": (40, 200, 220)}
         for detection in detections:
@@ -255,10 +246,8 @@ def detect():
             cv2.rectangle(plotted, (x1, top), (x1 + text_width + 6, y1), color, -1)
             cv2.putText(plotted, label, (x1 + 3, max(text_height, y1 - baseline - 2)),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
-        from PIL import Image as PILImage
         output = io.BytesIO()
-        PILImage.fromarray(plotted).save(output, format="JPEG", quality=90)
-        import base64
+        Image.fromarray(plotted).save(output, format="JPEG", quality=90)
         return jsonify(success=True, message="Analisis selesai.", detections=detections,
                        total=len(detections), width=image.width, height=image.height,
                        confidence_threshold=stone_threshold,
