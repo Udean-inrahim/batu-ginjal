@@ -116,7 +116,7 @@ def detect():
 
         # Kidney localization from joint model and dedicated multiplane kidney weights.
         kidney_candidates = []
-        full_result = stone_model.predict(image, conf=min(kidney_threshold, 0.20), imgsz=640, verbose=False)[0]
+        full_result = stone_model.predict(image, conf=kidney_threshold, imgsz=640, verbose=False)[0]
         for box in full_result.boxes:
             label = full_result.names.get(int(box.cls.item()), "")
             if label.lower() == "kidney":
@@ -135,7 +135,7 @@ def detect():
                     (image.crop((max(0, split_x - overlap), 0, img_w, img_h)), max(0, split_x - overlap)),
                 ])
             for kidney_input, offset_x in kidney_inputs:
-                kidney_result = kidney_model.predict(kidney_input, conf=min(kidney_threshold, 0.20), imgsz=640, verbose=False)[0]
+                kidney_result = kidney_model.predict(kidney_input, conf=kidney_threshold, imgsz=640, verbose=False)[0]
                 for box in kidney_result.boxes:
                     coords = box.xyxy[0].tolist()
                     xyxy = [round(coords[0] + offset_x, 2), round(coords[1], 2),
@@ -153,6 +153,13 @@ def detect():
             if not (0.10 <= center_y <= 0.90 and 0.04 <= box_w <= 0.50
                     and 0.04 <= box_h <= 0.60 and 0.003 <= box_area <= 0.22):
                 continue
+            
+            # Exclusion of posterior midline objects (vertebra/spine)
+            # Kidneys are strictly bilateral (retroperitoneal), never sitting exactly in the midline
+            # In axial/coronal CT, the spine (midline) occupies ~ 0.43 to 0.57.
+            if 0.42 <= center_x <= 0.58 and center_y >= 0.45:
+                continue
+
             if any(abs(center_x - (k["bbox"][0] + k["bbox"][2]) / (2 * img_w)) < 0.10
                    for k in displayed_kidneys):
                 continue
