@@ -150,14 +150,14 @@ def detect():
             center_y = ((y1 + y2) / 2) / img_h
             center_x = ((x1 + x2) / 2) / img_w
             box_area = box_w * box_h
-            if not (0.10 <= center_y <= 0.90 and 0.04 <= box_w <= 0.50
-                    and 0.04 <= box_h <= 0.60 and 0.003 <= box_area <= 0.22):
+            if not (0.05 <= center_y <= 0.95 and 0.03 <= box_w <= 0.55
+                    and 0.03 <= box_h <= 0.65 and 0.002 <= box_area <= 0.25):
                 continue
             
             # Exclusion of posterior midline objects (vertebra/spine)
             # Kidneys are strictly bilateral (retroperitoneal), never sitting exactly in the midline
-            # In axial/coronal CT, the spine (midline) occupies ~ 0.43 to 0.57.
-            if 0.42 <= center_x <= 0.58 and center_y >= 0.45:
+            # In axial/coronal CT, the spine (midline) occupies ~ 0.40 to 0.60.
+            if 0.40 <= center_x <= 0.60:
                 continue
 
             if any(abs(center_x - (k["bbox"][0] + k["bbox"][2]) / (2 * img_w)) < 0.10
