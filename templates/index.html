@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="description" content="KidneyAI membantu meninjau citra CT Scan dengan deteksi objek berbasis YOLO.">
-  <title>makan gratis nya mana wok???</title>
+  <title>KidneyAI — Deteksi Batu Ginjal & Analisis Citra Medis CT Scan</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
 <body>
@@ -53,7 +53,7 @@
             <span class="upload-symbol" aria-hidden="true">＋</span><strong>Pilih gambar CT Scan</strong><span class="drop-hint">atau tarik dan letakkan file di sini</span><span class="file-rule">PNG, JPG, JPEG · Maksimal 16 MB</span>
           </label>
           <div class="preview-wrap" id="preview-wrap" hidden><img id="preview-image" alt="Pratinjau gambar CT Scan"><div class="preview-meta"><span id="file-name"></span><button id="remove-file" type="button" class="text-button">Hapus gambar</button></div></div>
-          <fieldset class="threshold-control"><legend>Ambang confidence kandidat batu</legend><label for="stone-threshold"><span>Stone <strong id="stone-threshold-value">10%</strong></span><input id="stone-threshold" type="range" min="5" max="80" value="10" step="5"></label><span class="threshold-help">Ambang ginjal ditetapkan otomatis. Ambang batu lebih rendah menampilkan lebih banyak kandidat, termasuk kemungkinan deteksi keliru.</span></fieldset>
+          <fieldset class="threshold-control"><legend>Ambang confidence kandidat batu</legend><label for="stone-threshold"><span>Stone <strong id="stone-threshold-value">20%</strong></span><input id="stone-threshold" type="range" min="5" max="80" value="20" step="5"></label><span class="threshold-help">Default 20% dipilih dari validation set untuk menyeimbangkan precision dan recall. Ambang lebih rendah mencari lebih banyak kandidat, tetapi dapat menambah false positive.</span></fieldset>
           <button class="button button-primary analyze-button" id="analyze-button" type="button" disabled>Mulai analisis</button>
           <p class="form-message" id="form-message" role="status" aria-live="polite"></p>
         </div>

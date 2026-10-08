@@ -142,85 +142,107 @@ def detect():
                             round(coords[2] + offset_x, 2), round(coords[3], 2)]
                     kidney_candidates.append((float(box.conf.item()), xyxy))
 
-        kidney_candidates.sort(key=lambda item: item[0], reverse=True)
-        displayed_kidneys = []
+        # In human anatomy, kidneys are bilateral retroperitoneal organs (1 on the right, 1 on the left).
+        # The central vertical column (0.45 <= center_x <= 0.55) contains the spine, aorta, and IVC.
+        # Kidneys NEVER occupy the midline spine.
+        right_kidney = None  # cx < 0.48
+        left_kidney = None   # cx > 0.52
+        img_np = np.asarray(image)
+
         for score, xyxy in kidney_candidates:
             x1, y1, x2, y2 = xyxy
             box_w, box_h = (x2 - x1) / img_w, (y2 - y1) / img_h
             center_y = ((y1 + y2) / 2) / img_h
             center_x = ((x1 + x2) / 2) / img_w
             box_area = box_w * box_h
-            if not (0.05 <= center_y <= 0.95 and 0.03 <= box_w <= 0.55
-                    and 0.03 <= box_h <= 0.65 and 0.002 <= box_area <= 0.25):
-                continue
-            
-            # Exclusion of posterior midline objects (vertebra/spine)
-            # Kidneys are strictly bilateral (retroperitoneal), never sitting exactly in the midline
-            # In axial/coronal CT, the spine (midline) occupies ~ 0.40 to 0.60.
-            if 0.40 <= center_x <= 0.60:
+
+            # Reject proposals in the central spine (midline column)
+            if 0.45 <= center_x <= 0.55:
                 continue
 
-            if any(abs(center_x - (k["bbox"][0] + k["bbox"][2]) / (2 * img_w)) < 0.10
-                   for k in displayed_kidneys):
+            # Reject proposals too low in pelvis/sacrum or too high near chest/neck
+            if center_y > 0.72 or center_y < 0.12:
                 continue
-            if score >= max(kidney_threshold, 0.15):
-                candidate = {"class": "Kidney", "confidence": round(score, 4), "bbox": xyxy}
-                displayed_kidneys.append(candidate)
-                detections.append(candidate)
-            if len(displayed_kidneys) == 2:
-                break
+
+            # Size sanity for kidneys across slice planes
+            if not (0.05 <= box_w <= 0.45 and 0.05 <= box_h <= 0.55 and 0.005 <= box_area <= 0.20):
+                continue
+
+            # Bone density check: kidneys are soft tissue (mean intensity ~60-120).
+            # Dense vertebral or pelvic bone has mean > 135 and > 30% pixels > 200.
+            crop = img_np[max(0, int(y1)):min(img_h, int(y2)), max(0, int(x1)):min(img_w, int(x2))]
+            if crop.size > 0:
+                mean_brightness = float(crop.mean())
+                dense_bone_frac = float((crop > 200).mean())
+                if mean_brightness > 135 and dense_bone_frac > 0.30:
+                    continue  # Reject bone/spine
+
+            # Confidence threshold: require at least 0.25 to reject bowel/soft tissue noise
+            if score < max(kidney_threshold, 0.25):
+                continue
+
+            # Assign highest confidence proposal per anatomical side (max 1 right, max 1 left)
+            if center_x < 0.48:
+                if right_kidney is None or score > right_kidney["confidence"]:
+                    right_kidney = {"class": "Kidney", "confidence": round(score, 4), "bbox": xyxy}
+            elif center_x > 0.52:
+                if left_kidney is None or score > left_kidney["confidence"]:
+                    left_kidney = {"class": "Kidney", "confidence": round(score, 4), "bbox": xyxy}
+
+        displayed_kidneys = [k for k in [right_kidney, left_kidney] if k is not None]
+        detections.extend(displayed_kidneys)
+
+        # Stone localization: kidney stones MUST reside within renal parenchyma or collecting system.
+        # They never reside in posterior ribs, back muscles, or spinal canal.
+        valid_renal_zones = []
+        midline = img_w / 2
+        for kidney in displayed_kidneys:
+            kx1, ky1, kx2, ky2 = kidney["bbox"]
+            # Tight 6% margin around detected kidney for renal hilum
+            mx, my = (kx2 - kx1) * 0.06, (ky2 - ky1) * 0.06
+            valid_renal_zones.append((kx1 - mx, ky1 - my, kx2 + mx, ky2 + my))
+
+        # If only one kidney was detected, synthesize the contralateral kidney fossa symmetrically
+        if len(displayed_kidneys) == 1:
+            kx1, ky1, kx2, ky2 = displayed_kidneys[0]["bbox"]
+            mx, my = (kx2 - kx1) * 0.06, (ky2 - ky1) * 0.06
+            ckx1 = max(0, 2 * midline - kx2 - mx)
+            ckx2 = min(img_w, 2 * midline - kx1 + mx)
+            valid_renal_zones.append((ckx1, ky1 - my, ckx2, ky2 + my))
 
         # Suppress duplicate Stone boxes and filter false positives (bones/ribs)
         stone_detections = sorted(
             [d for d in stone_candidates if d["confidence"] >= stone_threshold],
             key=lambda d: d["confidence"], reverse=True)
-        kidney_detections = [d for d in detections if d["class"].lower() != "stone"]
 
         plausible_stones = []
         for stone in stone_detections:
             sx1, sy1, sx2, sy2 = stone["bbox"]
             sw, sh = (sx2 - sx1) / img_w, (sy2 - sy1) / img_h
-            scx, scy = (sx1 + sx2) / (2 * img_w), (sy1 + sy2) / (2 * img_h)
-            if not (0.10 <= scx <= 0.90 and 0.15 <= scy <= 0.88):
+            scx = (sx1 + sx2) / 2
+            scy = (sy1 + sy2) / 2
+
+            # Reject oversized proposals (stones are focal calcifications)
+            if sw > 0.08 or sh > 0.08 or sw * sh > 0.003:
                 continue
 
-            crop_x1, crop_y1 = int(max(0, sx1)), int(max(0, sy1))
-            crop_x2, crop_y2 = int(min(img_w, sx2)), int(min(img_h, sy2))
-            if crop_x2 - crop_x1 < 1 or crop_y2 - crop_y1 < 1:
-                continue
-            crop = np.asarray(image)[crop_y1:crop_y2, crop_x1:crop_x2]
-            if crop.size == 0:
-                continue
-            median_brightness = np.median(crop)
-            std_brightness = np.std(crop)
-            is_dense_focal = (median_brightness > 150) and (std_brightness < 75)
-
-            if sw > 0.25 or sh > 0.25 or sw * sh > 0.045:
-                continue
-            if sw < 0.02 or sh < 0.02 or sw * sh < 0.0002:
-                if not is_dense_focal:
-                    continue
-
-            if kidney_detections:
-                near_kidney = False
-                for kidney in kidney_detections:
-                    kx1, ky1, kx2, ky2 = kidney["bbox"]
-                    px, py = (kx2 - kx1) * 0.15, (ky2 - ky1) * 0.15
-                    if (sx2 >= kx1 - px and sx1 <= kx2 + px
-                            and sy2 >= ky1 - py and sy1 <= ky2 + py):
-                        near_kidney = True
+            # If renal zones are localized, stone center MUST be inside a valid renal zone!
+            # This definitively eliminates posterior ribs and back musculature.
+            if valid_renal_zones:
+                in_renal_zone = False
+                for zx1, zy1, zx2, zy2 in valid_renal_zones:
+                    if zx1 <= scx <= zx2 and zy1 <= scy <= zy2:
+                        in_renal_zone = True
                         break
-                    midline = img_w / 2
-                    ckx1 = max(0, 2 * midline - kx2 - px)
-                    ckx2 = min(img_w, 2 * midline - kx1 + px)
-                    if (sx2 >= ckx1 and sx1 <= ckx2 and sy2 >= ky1 - py and sy1 <= ky2 + py):
-                        near_kidney = True
-                        break
-                if not near_kidney:
-                    continue
+                if not in_renal_zone:
+                    continue  # Rib, spine, or chest wall -> REJECT!
             else:
-                if not is_dense_focal and median_brightness < 180:
+                # If no kidney localized, reject midline spine and body perimeter
+                scx_norm = scx / img_w
+                scy_norm = scy / img_h
+                if 0.44 <= scx_norm <= 0.56 or not (0.15 <= scy_norm <= 0.82):
                     continue
+
             plausible_stones.append(stone)
 
         stone_detections = plausible_stones
@@ -228,18 +250,22 @@ def detect():
         for candidate in stone_detections:
             x1, y1, x2, y2 = candidate["bbox"]
             area_a = max(1, (x2 - x1) * (y2 - y1))
+            cx_a, cy_a = (x1 + x2) / 2, (y1 + y2) / 2
             duplicate = False
             for kept in unique_stones:
                 a1, b1, a2, b2 = kept["bbox"]
                 inter = max(0, min(x2, a2) - max(x1, a1)) * max(0, min(y2, b2) - max(y1, b1))
                 area_b = max(1, (a2 - a1) * (b2 - b1))
-                intersection_over_min = inter / max(1, min(area_a, area_b))
-                if inter / (area_a + area_b - inter) > 0.18 or intersection_over_min > 0.50:
+                cx_b, cy_b = (a1 + a2) / 2, (b1 + b2) / 2
+                dist = ((cx_a - cx_b) ** 2 + (cy_a - cy_b) ** 2) ** 0.5
+                if (inter / (area_a + area_b - inter) > 0.15 
+                        or inter / min(area_a, area_b) > 0.35 
+                        or dist < max(img_w, img_h) * 0.025):
                     duplicate = True
                     break
             if not duplicate:
                 unique_stones.append(candidate)
-        detections = kidney_detections + unique_stones
+        detections = displayed_kidneys + unique_stones
 
         plotted = np.asarray(image).copy()
         colors = {"Kidney": (220, 70, 35), "Stone": (40, 200, 220)}
