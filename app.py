@@ -1,4 +1,4 @@
-from flask import Flask, jsonify, render_template, request
+from flask import Flask, jsonify, render_template, request, send_file
 from werkzeug.exceptions import RequestEntityTooLarge
 from werkzeug.utils import secure_filename
 from PIL import Image, UnidentifiedImageError
@@ -6,16 +6,20 @@ from pathlib import Path
 import base64
 import cv2
 import io
+import json
 import numpy as np
 import os
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 16 * 1024 * 1024
+app.config["STONE_INFERENCE_IMGSZ"] = int(os.getenv("KIDNEYAI_STONE_IMGSZ", "768"))
+app.config["STONE_TILE_LAYOUT"] = os.getenv("KIDNEYAI_STONE_TILE_LAYOUT", "2x2")
 Image.MAX_IMAGE_PIXELS = 40_000_000
 ALLOWED_EXTENSIONS = {"png", "jpg", "jpeg"}
 MODEL_PATH = Path(os.getenv("KIDNEYAI_MODEL", "model/best.pt"))
 STONE_CORONAL_MODEL_PATH = Path(os.getenv("KIDNEYAI_STONE_CORONAL_MODEL", "model/stone_coronal_best.pt"))
 KIDNEY_MODEL_PATH = Path(os.getenv("KIDNEYAI_KIDNEY_MODEL", "model/kidney_best.pt"))
+REVIEW_QUEUE_PATH = Path(os.getenv("KIDNEYAI_REVIEW_QUEUE", "runs/axial_autolabel/candidates_stone.json"))
 _model = None
 _stone_coronal_model = None
 _kidney_model = None
@@ -92,10 +96,19 @@ def detect():
         stone_candidates = []
         scan_inputs = [(image, 0, 0)]
         if min(img_w, img_h) >= 300:
-            x_ranges = [(0, min(img_w, int(img_w * 0.65))),
-                        (max(0, int(img_w * 0.35)), img_w)]
-            y_ranges = [(0, min(img_h, int(img_h * 0.65))),
-                        (max(0, int(img_h * 0.35)), img_h)]
+            tile_fraction = 0.65
+            if app.config["STONE_TILE_LAYOUT"] == "3x3":
+                x_starts = [0, max(0, int(img_w * (1 - tile_fraction) / 2)),
+                            max(0, int(img_w * (1 - tile_fraction)))]
+                y_starts = [0, max(0, int(img_h * (1 - tile_fraction) / 2)),
+                            max(0, int(img_h * (1 - tile_fraction)))]
+                x_ranges = [(start, min(img_w, start + int(img_w * tile_fraction))) for start in sorted(set(x_starts))]
+                y_ranges = [(start, min(img_h, start + int(img_h * tile_fraction))) for start in sorted(set(y_starts))]
+            else:
+                x_ranges = [(0, min(img_w, int(img_w * tile_fraction))),
+                            (max(0, int(img_w * (1 - tile_fraction))), img_w)]
+                y_ranges = [(0, min(img_h, int(img_h * tile_fraction))),
+                            (max(0, int(img_h * (1 - tile_fraction))), img_h)]
             for left, right in x_ranges:
                 for top, bottom in y_ranges:
                     scan_inputs.append((image.crop((left, top, right, bottom)), left, top))
@@ -103,7 +116,7 @@ def detect():
         for scan_image, offset_x, offset_y in scan_inputs:
             for sm in stone_models:
                 scan_result = sm.predict(scan_image, conf=stone_threshold,
-                                          imgsz=640, verbose=False)[0]
+                                          imgsz=app.config["STONE_INFERENCE_IMGSZ"], verbose=False)[0]
                 for box in scan_result.boxes:
                     class_id = int(box.cls.item())
                     label = scan_result.names.get(class_id, str(class_id))
@@ -156,56 +169,55 @@ def detect():
             center_x = ((x1 + x2) / 2) / img_w
             box_area = box_w * box_h
 
-            # Reject proposals in the central spine (midline column)
-            if 0.45 <= center_x <= 0.55:
+            # Reject proposals in the central spine (midline column: tight 46%-54%)
+            if 0.46 <= center_x <= 0.54:
                 continue
 
-            # Reject proposals too low in pelvis/sacrum or too high near chest/neck
-            if center_y > 0.72 or center_y < 0.12:
+            # In coronal scans, kidneys can span from T12 to L3 (approx 0.10 to 0.85 of scan height)
+            if center_y > 0.86 or center_y < 0.08:
                 continue
 
             # Size sanity for kidneys across slice planes
-            if not (0.05 <= box_w <= 0.45 and 0.05 <= box_h <= 0.55 and 0.005 <= box_area <= 0.20):
+            if not (0.04 <= box_w <= 0.50 and 0.04 <= box_h <= 0.60 and 0.003 <= box_area <= 0.22):
                 continue
 
-            # Bone density check: kidneys are soft tissue (mean intensity ~60-120).
-            # Dense vertebral or pelvic bone has mean > 135 and > 30% pixels > 200.
+            # Bone density check: kidneys are soft tissue.
+            # Dense vertebral or pelvic bone has mean > 145 and > 35% pixels > 210.
             crop = img_np[max(0, int(y1)):min(img_h, int(y2)), max(0, int(x1)):min(img_w, int(x2))]
             if crop.size > 0:
                 mean_brightness = float(crop.mean())
-                dense_bone_frac = float((crop > 200).mean())
-                if mean_brightness > 135 and dense_bone_frac > 0.30:
-                    continue  # Reject bone/spine
+                dense_bone_frac = float((crop > 210).mean())
+                if mean_brightness > 145 and dense_bone_frac > 0.35:
+                    continue  # Reject dense bone/spine
 
-            # Confidence threshold: require at least 0.25 to reject bowel/soft tissue noise
-            if score < max(kidney_threshold, 0.25):
+            # Use requested kidney threshold (min 0.15) to maintain high recall
+            if score < max(kidney_threshold, 0.15):
                 continue
 
             # Assign highest confidence proposal per anatomical side (max 1 right, max 1 left)
-            if center_x < 0.48:
+            if center_x < 0.49:
                 if right_kidney is None or score > right_kidney["confidence"]:
                     right_kidney = {"class": "Kidney", "confidence": round(score, 4), "bbox": xyxy}
-            elif center_x > 0.52:
+            elif center_x > 0.51:
                 if left_kidney is None or score > left_kidney["confidence"]:
                     left_kidney = {"class": "Kidney", "confidence": round(score, 4), "bbox": xyxy}
 
         displayed_kidneys = [k for k in [right_kidney, left_kidney] if k is not None]
         detections.extend(displayed_kidneys)
 
-        # Stone localization: kidney stones MUST reside within renal parenchyma or collecting system.
-        # They never reside in posterior ribs, back muscles, or spinal canal.
+        # Stone localization: kidney stones reside within renal parenchyma, collecting system,
+        # or proximal ureter. Provide an anatomically sound 14% margin around kidney boxes.
         valid_renal_zones = []
         midline = img_w / 2
         for kidney in displayed_kidneys:
             kx1, ky1, kx2, ky2 = kidney["bbox"]
-            # Tight 6% margin around detected kidney for renal hilum
-            mx, my = (kx2 - kx1) * 0.06, (ky2 - ky1) * 0.06
+            mx, my = (kx2 - kx1) * 0.14, (ky2 - ky1) * 0.14
             valid_renal_zones.append((kx1 - mx, ky1 - my, kx2 + mx, ky2 + my))
 
         # If only one kidney was detected, synthesize the contralateral kidney fossa symmetrically
         if len(displayed_kidneys) == 1:
             kx1, ky1, kx2, ky2 = displayed_kidneys[0]["bbox"]
-            mx, my = (kx2 - kx1) * 0.06, (ky2 - ky1) * 0.06
+            mx, my = (kx2 - kx1) * 0.14, (ky2 - ky1) * 0.14
             ckx1 = max(0, 2 * midline - kx2 - mx)
             ckx2 = min(img_w, 2 * midline - kx1 + mx)
             valid_renal_zones.append((ckx1, ky1 - my, ckx2, ky2 + my))
@@ -222,8 +234,8 @@ def detect():
             scx = (sx1 + sx2) / 2
             scy = (sy1 + sy2) / 2
 
-            # Reject oversized proposals (stones are focal calcifications)
-            if sw > 0.08 or sh > 0.08 or sw * sh > 0.003:
+            # Allow focal stones up to staghorn size (sw/sh <= 0.20, area <= 0.025)
+            if sw > 0.20 or sh > 0.20 or sw * sh > 0.025:
                 continue
 
             # If renal zones are localized, stone center MUST be inside a valid renal zone!
@@ -291,6 +303,75 @@ def detect():
     except Exception:
         app.logger.exception("Inference gagal")
         return jsonify(success=False, message="Terjadi kesalahan saat analisis. Periksa konfigurasi model lalu coba lagi."), 500
+
+
+def _load_review_queue():
+    if not REVIEW_QUEUE_PATH.is_file():
+        return None
+    return json.loads(REVIEW_QUEUE_PATH.read_text(encoding="utf-8"))
+
+
+@app.get("/review")
+def review_page():
+    return render_template("review.html")
+
+
+@app.get("/api/review/queue")
+def review_queue():
+    queue = _load_review_queue()
+    if queue is None:
+        return jsonify(success=False, message="Antrean review belum ada. Jalankan tools/autolabel_axial_stones.py."), 404
+    summary = {
+        "queue_path": str(REVIEW_QUEUE_PATH),
+        "source": queue["source"],
+        "label_class": queue.get("label_class", ""),
+        "image_count": queue.get("image_count", len(queue["records"])),
+        "reviewed_count": sum(bool(record.get("reviewed")) for record in queue["records"]),
+        "records": queue["records"],
+    }
+    return jsonify(success=True, queue=summary)
+
+
+@app.post("/api/review/save")
+def review_save():
+    queue = _load_review_queue()
+    if queue is None:
+        return jsonify(success=False, message="Antrean review belum ada."), 404
+    payload = request.get_json(silent=True) or {}
+    name = payload.get("image")
+    record = next((item for item in queue["records"] if item["image"] == name), None)
+    if record is None:
+        return jsonify(success=False, message="Citra tidak ditemukan di antrean."), 404
+
+    accepted = []
+    for item in payload.get("accepted", []):
+        bbox = item.get("bbox")
+        if not (isinstance(bbox, list) and len(bbox) == 4):
+            return jsonify(success=False, message="Bounding box tidak valid."), 400
+        try:
+            cleaned = [round(float(value), 2) for value in bbox]
+        except (TypeError, ValueError):
+            return jsonify(success=False, message="Bounding box bukan angka."), 400
+        accepted.append({"class": item.get("class", "Stone"),
+                         "confidence": item.get("confidence", 0.0), "bbox": cleaned})
+
+    record["accepted"] = accepted
+    record["reviewed"] = True
+    REVIEW_QUEUE_PATH.write_text(json.dumps(queue, indent=2), encoding="utf-8")
+    return jsonify(success=True, accepted=len(accepted),
+                   reviewed_count=sum(bool(item.get("reviewed")) for item in queue["records"]))
+
+
+@app.get("/api/review/image/<path:name>")
+def review_image(name):
+    queue = _load_review_queue()
+    if queue is None:
+        return jsonify(success=False, message="Antrean review belum ada."), 404
+    base = Path(queue["source"]).resolve()
+    candidate = (base / name).resolve()
+    if base not in candidate.parents or not candidate.is_file():
+        return jsonify(success=False, message="Citra tidak ditemukan."), 404
+    return send_file(candidate)
 
 
 @app.errorhandler(RequestEntityTooLarge)

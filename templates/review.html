@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="id">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>KidneyAI — Review Anotasi Batu</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='review.css') }}">
+</head>
+<body>
+  <header class="rv-header">
+    <a class="wordmark" href="/"><span class="mark" aria-hidden="true">K</span>kidney<span>ai</span></a>
+    <div class="rv-meta">
+      <span id="rv-queue-path" class="rv-muted"></span>
+      <span id="rv-progress" class="rv-progress">0 / 0 ditinjau</span>
+    </div>
+  </header>
+
+  <main class="rv-layout">
+    <aside class="rv-sidebar">
+      <div class="rv-filters">
+        <button type="button" id="rv-filter-all" class="rv-chip is-active">Semua</button>
+        <button type="button" id="rv-filter-todo" class="rv-chip">Belum</button>
+        <button type="button" id="rv-filter-done" class="rv-chip">Selesai</button>
+      </div>
+      <ol id="rv-list" class="rv-list"></ol>
+    </aside>
+
+    <section class="rv-main">
+      <div id="rv-empty" class="rv-empty">Antrean belum tersedia. Jalankan <code>tools/autolabel_axial_stones.py</code> lalu muat ulang.</div>
+      <div id="rv-workspace" class="rv-workspace" hidden>
+        <div class="rv-toolbar">
+          <div class="rv-title">
+            <strong id="rv-name">—</strong>
+            <span id="rv-patient" class="rv-muted"></span>
+          </div>
+          <div class="rv-actions">
+            <button type="button" id="rv-auto" class="rv-btn">Auto top-1: aktif</button>
+            <button type="button" id="rv-add" class="rv-btn">Tambah kotak</button>
+            <button type="button" id="rv-accept-all" class="rv-btn">Terima semua</button>
+            <button type="button" id="rv-clear" class="rv-btn">Kosongkan</button>
+            <button type="button" id="rv-prev" class="rv-btn">‹ Sebelumnya</button>
+            <button type="button" id="rv-next" class="rv-btn">Berikutnya ›</button>
+            <button type="button" id="rv-save" class="rv-btn rv-btn-primary">Simpan</button>
+          </div>
+        </div>
+        <p class="rv-hint">Klik kotak untuk terima/batal, geser badan untuk pindah, tarik sudut untuk ubah ukuran. Tekan <kbd>A</kbd> terima semua, <kbd>N</kbd> berikutnya, <kbd>Del</kbd> hapus kotak aktif.</p>
+        <div class="rv-stage">
+          <div id="rv-canvas" class="rv-canvas">
+            <img id="rv-image" alt="Citra CT ditinjau" draggable="false">
+            <div id="rv-overlay" class="rv-overlay"></div>
+          </div>
+        </div>
+        <p id="rv-status" class="rv-status"></p>
+      </div>
+    </section>
+  </main>
+
+  <script src="{{ url_for('static', filename='review.js') }}"></script>
+</body>
+</html>
